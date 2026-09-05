@@ -1,0 +1,4 @@
+# dev/test only -- never imported by anything under mini_autograd/
+-r requirements.txt
+pytest>=7.0
+torch>=2.0

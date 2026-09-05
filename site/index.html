@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Phase 1 of mini-autograd: a reverse-mode autodiff engine in pure NumPy.">
+<style>html{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
+<title>Inside backward()</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&amp;family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap">
+<style>
+:root{
+  --paper:#F1F3F5; --surface:#FFFFFF; --sunk:#E7EBEE;
+  --ink:#12171C; --ink-2:#4C5862; --ink-3:#77848D;
+  --rule:#D3DAE0; --rule-soft:#E3E8EC;
+  --fw:#1F6B8F;   /* forward pass: values */
+  --bw:#AE3346;   /* backward pass: gradients */
+  --ok:#2E6B4F;
+  --fw-wash:#E4EEF3; --bw-wash:#F7E7E9; --ok-wash:#E3EEE8;
+  --display:"Bricolage Grotesque","Helvetica Neue",Arial,sans-serif;
+  --body:"Newsreader",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --fs-xs:.72rem; --fs-sm:.83rem; --fs-cd:.815rem; --fs-base:1.0625rem;
+  --fs-lg:1.22rem; --fs-xl:1.6rem; --fs-2xl:2.15rem; --fs-3xl:3rem;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#101519; --surface:#171E24; --sunk:#0B1013;
+    --ink:#E8EDF1; --ink-2:#A6B3BC; --ink-3:#77858F;
+    --rule:#2A343C; --rule-soft:#212A31;
+    --fw:#68B4D6; --bw:#E8848F; --ok:#79C4A0;
+    --fw-wash:#16303C; --bw-wash:#392026; --ok-wash:#173026;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#101519; --surface:#171E24; --sunk:#0B1013;
+  --ink:#E8EDF1; --ink-2:#A6B3BC; --ink-3:#77858F;
+  --rule:#2A343C; --rule-soft:#212A31;
+  --fw:#68B4D6; --bw:#E8848F; --ok:#79C4A0;
+  --fw-wash:#16303C; --bw-wash:#392026; --ok-wash:#173026;
+}
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:var(--body); font-size:var(--fs-base); line-height:1.62;
+  -webkit-font-smoothing:antialiased; margin:0;
+}
+main{
+  display:grid; padding:0 20px 96px;
+  grid-template-columns:[full-start] 1fr [main-start] min(72ch,100%) [main-end] 1fr [full-end];
+  row-gap:0;
+}
+main>*{grid-column:main}
+main>.wide{grid-column:full; width:min(1040px,100%); margin-inline:auto}
+p{margin:0 0 1.05em; text-wrap:pretty}
+a{color:var(--fw)}
+:focus-visible{outline:2px solid var(--fw); outline-offset:3px; border-radius:2px}
+
+/* ---------- masthead ---------- */
+.mast{padding:72px 0 0}
+.kicker{
+  font-family:var(--mono); font-size:var(--fs-xs); letter-spacing:.14em;
+  text-transform:uppercase; color:var(--ink-3); margin:0 0 22px;
+  display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+}
+.kicker b{color:var(--ink-2); font-weight:400}
+h1{
+  font-family:var(--display); font-weight:800; font-size:var(--fs-3xl);
+  line-height:1.02; letter-spacing:-.03em; margin:0 0 .38em; text-wrap:balance;
+}
+h1 .paren{color:var(--fw); font-weight:400}
+.standfirst{
+  font-size:var(--fs-lg); line-height:1.5; color:var(--ink-2);
+  max-width:58ch; margin:0 0 34px;
+}
+.standfirst em{font-style:italic; color:var(--ink)}
+
+/* ---------- metric strip ---------- */
+.strip{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
+  margin:0 0 64px;
+}
+.metric{padding:18px 22px 20px; border-left:1px solid var(--rule-soft)}
+.metric:first-child{border-left:0; padding-left:0}
+.metric .n{
+  font-family:var(--display); font-weight:600; font-size:var(--fs-xl);
+  letter-spacing:-.02em; line-height:1.1; font-variant-numeric:tabular-nums;
+  display:block;
+}
+.metric .l{
+  font-family:var(--mono); font-size:var(--fs-xs); letter-spacing:.07em;
+  text-transform:uppercase; color:var(--ink-3); margin-top:5px; display:block;
+}
+.metric.pass .n{color:var(--ok)}
+
+/* ---------- sections ---------- */
+section{margin:0 0 62px}
+.eyebrow{
+  font-family:var(--mono); font-size:var(--fs-xs); letter-spacing:.15em;
+  text-transform:uppercase; color:var(--bw); margin:0 0 10px;
+}
+.eyebrow.fwd{color:var(--fw)}
+h2{
+  font-family:var(--display); font-weight:600; font-size:var(--fs-2xl);
+  letter-spacing:-.025em; line-height:1.12; margin:0 0 .5em; text-wrap:balance;
+}
+h3{
+  font-family:var(--display); font-weight:600; font-size:var(--fs-lg);
+  letter-spacing:-.015em; margin:2em 0 .5em;
+}
+code{font-family:var(--mono); font-size:.88em; background:var(--sunk); padding:.1em .32em; border-radius:3px}
+.fwd-t{color:var(--fw)} .bwd-t{color:var(--bw)}
+
+/* ---------- code blocks ---------- */
+.code{
+  background:var(--surface); border:1px solid var(--rule);
+  border-radius:5px; overflow:hidden; margin:22px 0;
+}
+.code .hd{
+  font-family:var(--mono); font-size:var(--fs-xs); color:var(--ink-3);
+  padding:9px 16px; border-bottom:1px solid var(--rule-soft);
+  display:flex; justify-content:space-between; gap:16px; letter-spacing:.03em;
+}
+.code pre{
+  margin:0; padding:16px; overflow-x:auto;
+  font-family:var(--mono); font-size:var(--fs-cd); line-height:1.72; tab-size:4;
+}
+.code.term{background:var(--sunk)}
+.code.term pre{color:var(--ink-2)}
+.c{color:var(--ink-3); font-style:italic}
+.k{color:var(--bw)}
+.f{color:var(--fw)}
+.g{color:var(--ok); font-weight:700}
+
+/* ---------- shape table ---------- */
+.tbl-wrap{overflow-x:auto; margin:24px 0}
+table{border-collapse:collapse; width:100%; font-family:var(--mono); font-size:var(--fs-sm)}
+th{
+  text-align:left; font-weight:400; font-size:var(--fs-xs); letter-spacing:.09em;
+  text-transform:uppercase; color:var(--ink-3); padding:0 18px 9px 0;
+  border-bottom:1px solid var(--rule); white-space:nowrap;
+}
+td{padding:8px 18px 8px 0; border-bottom:1px solid var(--rule-soft); white-space:nowrap; color:var(--ink-2)}
+td.sh{color:var(--ink)}
+tr.hi td{background:var(--bw-wash)}
+tr.hi td:first-child{box-shadow:inset 3px 0 0 var(--bw)}
+tr.hi td.sh{color:var(--ink)}
+.dash{color:var(--ink-3)}
+
+/* ---------- diagram ---------- */
+figure{margin:26px 0 0}
+.diagram{
+  background:var(--surface); border:1px solid var(--rule); border-radius:5px;
+  padding:22px 18px 14px; overflow-x:auto;
+}
+.diagram svg{display:block; width:100%; min-width:640px; height:auto}
+figcaption{
+  font-size:var(--fs-sm); color:var(--ink-2); margin-top:14px;
+  display:flex; gap:22px; flex-wrap:wrap; font-family:var(--mono);
+}
+figcaption span{display:inline-flex; align-items:center; gap:7px}
+figcaption i{width:16px; height:2px; display:inline-block; border-radius:2px}
+
+/* ---------- callout ---------- */
+.note{
+  border-left:2px solid var(--bw); background:var(--bw-wash);
+  padding:16px 20px; margin:24px 0; border-radius:0 4px 4px 0;
+}
+.note p:last-child{margin-bottom:0}
+.note .lbl{
+  font-family:var(--mono); font-size:var(--fs-xs); letter-spacing:.1em;
+  text-transform:uppercase; color:var(--bw); display:block; margin-bottom:6px;
+}
+
+/* ---------- phases ---------- */
+ol.phases{list-style:none; margin:24px 0 0; padding:0; counter-reset:ph}
+ol.phases li{
+  counter-increment:ph; display:grid; grid-template-columns:auto 1fr auto;
+  gap:16px; align-items:baseline; padding:13px 0;
+  border-bottom:1px solid var(--rule-soft);
+}
+ol.phases li::before{
+  content:"0" counter(ph); font-family:var(--mono); font-size:var(--fs-sm);
+  color:var(--ink-3); font-variant-numeric:tabular-nums;
+}
+ol.phases .t{font-size:var(--fs-base)}
+ol.phases .t small{display:block; color:var(--ink-2); font-size:var(--fs-sm); line-height:1.45}
+.tag{
+  font-family:var(--mono); font-size:var(--fs-xs); letter-spacing:.06em;
+  text-transform:uppercase; padding:3px 9px; border-radius:99px; white-space:nowrap;
+}
+.tag.done{background:var(--ok-wash); color:var(--ok)}
+.tag.next{background:var(--fw-wash); color:var(--fw)}
+.tag.todo{background:var(--sunk); color:var(--ink-3)}
+
+/* ---------- open questions ---------- */
+dl.open{margin:20px 0 0; display:grid; gap:20px}
+dl.open dt{font-family:var(--mono); font-size:var(--fs-sm); color:var(--bw); margin-bottom:4px}
+dl.open dd{margin:0; color:var(--ink-2)}
+
+footer{
+  border-top:1px solid var(--rule); padding-top:20px; margin-top:12px;
+  font-family:var(--mono); font-size:var(--fs-xs); color:var(--ink-3);
+  display:flex; justify-content:space-between; gap:20px; flex-wrap:wrap;
+}
+@media (max-width:640px){
+  :root{--fs-3xl:2.15rem; --fs-2xl:1.6rem; --fs-xl:1.35rem}
+  .mast{padding-top:44px}
+  .metric:first-child{padding-left:22px}
+  .metric{border-left:0; border-top:1px solid var(--rule-soft)}
+  .metric:first-child{border-top:0}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+</style>
+
+</head>
+<body>
+<main>
+  <header class="mast">
+    <p class="kicker">
+      <span>mini-autograd</span><span>·</span><b>Phase 1 of 6 — core engine</b><span>·</span><b>5 Sep 2026</b>
+    </p>
+    <h1>Inside <span class="paren">backward()</span></h1>
+    <p class="standfirst">
+      A reverse-mode automatic differentiation engine written from scratch in pure NumPy.
+      No PyTorch, no JAX, no autograd — <em>the tensor, the graph, the chain rule and the
+      teardown are all in this repo</em>. Phase 1 builds the engine itself: topological
+      ordering, gradient accumulation, reverse broadcasting, graph release.
+    </p>
+  </header>
+
+  <div class="strip">
+    <div class="metric pass"><span class="n">56</span><span class="l">tests passing</span></div>
+    <div class="metric"><span class="n">386</span><span class="l">lines of core</span></div>
+    <div class="metric"><span class="n">0</span><span class="l">torch imports in core</span></div>
+    <div class="metric"><span class="n">0.15<span style="font-size:.55em; color:var(--ink-3)">s</span></span><span class="l">suite wall-clock</span></div>
+  </div>
+
+  <section>
+    <p class="eyebrow">The question this answers</p>
+    <h2>What does a framework actually do between <code style="font-size:.72em">loss.backward()</code> and the weight update?</h2>
+    <p>
+      Four things, and Phase 1 implements all four. It <span class="fwd-t">records</span> every
+      operation as a node in a directed acyclic graph while the forward pass runs. It
+      <span class="bwd-t">orders</span> those nodes so no node is differentiated before its
+      consumers are done. It <span class="bwd-t">accumulates</span> — a tensor used twice
+      receives two gradients and they must be summed, not overwritten. And it
+      <span class="bwd-t">releases</span> the graph, because a training loop that keeps every
+      intermediate activation alive for 5000 steps is not a training loop, it is a memory leak
+      with a progress bar.
+    </p>
+  </section>
+
+  <section class="wide">
+    <p class="eyebrow">Accumulation · the diamond graph</p>
+    <h2>Two paths, one gradient</h2>
+    <figure>
+      <div class="diagram">
+        <svg viewBox="0 0 760 300" role="img" aria-label="Computation graph for y equals x times x plus x, showing two gradient paths meeting at x">
+          <defs>
+            <marker id="af" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--fw)"></path>
+            </marker>
+            <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--bw)"></path>
+            </marker>
+          </defs>
+
+          <!-- forward edges -->
+          <path d="M112,128 C168,116 186,62 232,62" fill="none" stroke="var(--fw)" stroke-width="1.6" marker-end="url(#af)"></path>
+          <path d="M112,152 C250,206 330,206 444,158" fill="none" stroke="var(--fw)" stroke-width="1.6" marker-end="url(#af)"></path>
+          <path d="M348,62 C398,62 404,116 444,128" fill="none" stroke="var(--fw)" stroke-width="1.6" marker-end="url(#af)"></path>
+          <path d="M532,140 L616,140" fill="none" stroke="var(--fw)" stroke-width="1.6" marker-end="url(#af)"></path>
+
+          <!-- backward gradient chips -->
+          <g font-family="var(--mono)" font-size="13" fill="var(--bw)">
+            <rect x="150" y="72" width="40" height="22" rx="11" fill="var(--bw-wash)" stroke="var(--bw)" stroke-width="1"></rect>
+            <text x="170" y="87" text-anchor="middle" fill="var(--bw)">2x</text>
+            <rect x="286" y="196" width="34" height="22" rx="11" fill="var(--bw-wash)" stroke="var(--bw)" stroke-width="1"></rect>
+            <text x="303" y="211" text-anchor="middle" fill="var(--bw)">1</text>
+          </g>
+          <path d="M232,84 C196,96 150,106 118,118" fill="none" stroke="var(--bw)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ab)"></path>
+          <path d="M444,176 C336,214 236,196 120,162" fill="none" stroke="var(--bw)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ab)"></path>
+
+          <!-- nodes -->
+          <g font-family="var(--mono)" font-size="14">
+            <rect x="26" y="118" width="86" height="44" rx="4" fill="var(--surface)" stroke="var(--bw)" stroke-width="1.8"></rect>
+            <text x="69" y="145" text-anchor="middle" fill="var(--ink)">x</text>
+
+            <rect x="232" y="40" width="116" height="44" rx="4" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.4"></rect>
+            <text x="290" y="67" text-anchor="middle" fill="var(--ink)">mul</text>
+
+            <rect x="444" y="118" width="88" height="44" rx="4" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.4"></rect>
+            <text x="488" y="145" text-anchor="middle" fill="var(--ink)">add</text>
+
+            <rect x="616" y="118" width="118" height="44" rx="4" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.4"></rect>
+            <text x="675" y="145" text-anchor="middle" fill="var(--ink)">sum</text>
+          </g>
+
+          <!-- result label -->
+          <g font-family="var(--mono)" font-size="12.5">
+            <text x="69" y="188" text-anchor="middle" fill="var(--bw)">x.grad = 2x + 1</text>
+            <text x="69" y="206" text-anchor="middle" fill="var(--ink-3)">[-5, 2, 5, 15]</text>
+            <text x="675" y="188" text-anchor="middle" fill="var(--ink-3)">seed = 1.0</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>
+        <span><i style="background:var(--fw)"></i> forward — values</span>
+        <span><i style="background:var(--bw)"></i> backward — gradients</span>
+        <span>y = x*x + x &nbsp;→&nbsp; dy/dx = 2x + 1</span>
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p>
+      This is the whole reason <code>accumulate_grad</code> uses <code>+=</code> and not <code>=</code>.
+      <code>x</code> has two consumers, so two gradients arrive at it: <span class="bwd-t">2x</span> down
+      the <code>mul</code> path and <span class="bwd-t">1</span> down the direct path. An engine that
+      assigns instead of accumulating returns whichever arrived last — <code>2x</code> or <code>1</code>,
+      never <code>2x + 1</code> — and the bug is invisible on any graph where each tensor is used once,
+      which is most toy examples. <code>test_diamond_graph</code> exists to make it visible.
+    </p>
+  </section>
+
+  <section class="wide">
+    <p class="eyebrow bwd">The hard part · reverse broadcasting</p>
+    <h2>Undoing what NumPy did for free</h2>
+    <div style="max-width:72ch">
+    <p>
+      Broadcasting in the forward pass is <em>replication</em>, and the adjoint of replication is
+      <em>summation</em>: if one value was copied into N output slots, N gradients come back and they
+      all belong to that one slot. NumPy replicates in exactly two steps, so <code>unbroadcast</code>
+      undoes exactly two. First it left-pads the rank with 1s — a <code>(4,)</code> operand used
+      against <code>(2,3,4)</code> is treated as <code>(1,1,4)</code> — and those padded axes are
+      summed <em>away</em>, since the original operand has no such axis. Then it stretches every
+      remaining extent-1 axis, which is summed with <code>keepdims=True</code>, because the original
+      operand still has a length-1 axis sitting right there.
+    </p>
+    </div>
+    <div class="code">
+      <div class="hd"><span>mini_autograd/broadcast.py</span><span>46 lines</span></div>
+<pre><span class="k">def</span> <span class="f">unbroadcast</span>(grad: np.ndarray, shape: tuple[int, ...]) -&gt; np.ndarray:
+    grad = np.asarray(grad)
+    <span class="k">if</span> grad.shape == shape:
+        <span class="k">return</span> grad
+
+    <span class="c"># (1) undo rank expansion</span>
+    extra_dims = grad.ndim - len(shape)
+    <span class="k">if</span> extra_dims &gt; 0:
+        grad = grad.sum(axis=tuple(range(extra_dims)))
+    <span class="k">elif</span> extra_dims &lt; 0:
+        <span class="k">raise</span> ValueError(f<span class="f">"cannot unbroadcast {np.shape(grad)} down to {shape}"</span>)
+
+    <span class="c"># (2) undo size-1 stretching</span>
+    axes = tuple(i <span class="k">for</span> i, dim <span class="k">in</span> enumerate(shape) <span class="k">if</span> dim == 1 <span class="k">and</span> grad.shape[i] != 1)
+    <span class="k">if</span> axes:
+        grad = grad.sum(axis=axes, keepdims=<span class="k">True</span>)
+
+    <span class="c"># shapes must now agree exactly -- reshape raises if they don't</span>
+    <span class="k">return</span> np.asarray(grad).reshape(shape)</pre>
+    </div>
+    <div style="max-width:72ch">
+    <p>
+      That trailing <code>reshape</code> is deliberate paranoia. If the two steps don't land exactly on
+      the target shape it raises, instead of quietly returning a plausible-looking array of the wrong
+      size that would then poison every weight downstream.
+    </p>
+    </div>
+
+    <h3>Every case, and which step handles it</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Operand shape</th><th>Broadcast to</th><th>Step 1 — sum away</th><th>Step 2 — sum keepdims</th>
+        </tr></thead>
+        <tbody>
+          <tr><td class="sh">()</td><td>(3, 4)</td><td>axes (0, 1)</td><td class="dash">—</td></tr>
+          <tr><td class="sh">(1,)</td><td>(5,)</td><td class="dash">—</td><td>axis (0)</td></tr>
+          <tr><td class="sh">(3, 1)</td><td>(3, 4)</td><td class="dash">—</td><td>axis (1)</td></tr>
+          <tr><td class="sh">(1, 4)</td><td>(3, 4)</td><td class="dash">—</td><td>axis (0)</td></tr>
+          <tr><td class="sh">(4,)</td><td>(2, 3, 4)</td><td>axes (0, 1)</td><td class="dash">—</td></tr>
+          <tr><td class="sh">(3, 4)</td><td>(2, 3, 4)</td><td>axis (0)</td><td class="dash">—</td></tr>
+          <tr><td class="sh">(2, 1, 4)</td><td>(2, 3, 4)</td><td class="dash">—</td><td>axis (1)</td></tr>
+          <tr><td class="sh">(1, 1, 1)</td><td>(2, 3, 4)</td><td class="dash">—</td><td>axes (0, 1, 2)</td></tr>
+          <tr><td class="sh">(2, 3, 4)</td><td>(2, 3, 4)</td><td colspan="2" class="dash">identity — early return</td></tr>
+          <tr class="hi"><td class="sh">(1,)</td><td>(2, 3, 4)</td><td>axes (0, 1)</td><td>axis (0)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="max-width:72ch">
+      <div class="note">
+        <span class="lbl">Bug #1 — caught by the highlighted row</span>
+        <p>
+          The last case is the only one that needs <em>both</em> steps, and it is the one that failed.
+          Not an engine bug: <code>unbroadcast</code> sums the replicated axes in two passes while my
+          reference implementation summed them in one, float addition is not associative, and the two
+          disagreed by ~1e-16. The test asserted <code>atol=0</code>, so it only fired on some random
+          draws. The <em>test</em> was wrong; tolerance is now <code>1e-12</code>.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wide">
+    <p class="eyebrow bwd">Ordering</p>
+    <h2>Topological sort, iteratively</h2>
+    <div style="max-width:72ch">
+    <p>
+      A node may only be differentiated once every consumer downstream of it has contributed its
+      share — otherwise a tensor feeding two branches gets pushed upstream while half its gradient is
+      still missing. Post-order DFS over the <code>_prev</code> edges gives inputs-before-consumers;
+      <code>backward()</code> then walks that list <em>reversed</em>, which is consumers-before-inputs,
+      exactly the guarantee needed.
+    </p>
+    </div>
+    <div class="code">
+      <div class="hd"><span>mini_autograd/tensor.py:100</span><span>Tensor._toposort</span></div>
+<pre><span class="k">def</span> <span class="f">_toposort</span>(self) -&gt; list[<span class="f">"Tensor"</span>]:
+    topo: list[Tensor] = []
+    visited: set[int] = set()
+    stack: list[tuple[Tensor, bool]] = [(self, <span class="k">False</span>)]
+    <span class="k">while</span> stack:
+        node, expanded = stack.pop()
+        <span class="k">if</span> expanded:
+            topo.append(node)
+            <span class="k">continue</span>
+        <span class="k">if</span> id(node) <span class="k">in</span> visited:
+            <span class="k">continue</span>
+        visited.add(id(node))
+        stack.append((node, <span class="k">True</span>))          <span class="c"># re-push self *under* its inputs</span>
+        <span class="k">for</span> parent <span class="k">in</span> node._prev:
+            <span class="k">if</span> id(parent) <span class="k">not in</span> visited:
+                stack.append((parent, <span class="k">False</span>))
+    <span class="k">return</span> topo</pre>
+    </div>
+    <div style="max-width:72ch">
+    <p>
+      The <code>expanded</code> flag is the iterative equivalent of "code after the recursive call":
+      popping a node the first time schedules it for emission <em>beneath</em> all of its inputs, so it
+      can only be appended once they are all done. It is iterative rather than recursive because
+      Python's recursion limit is around 1000 and a real graph is easily longer —
+      <code>test_toposort_is_iterative_and_survives_a_deep_chain</code> builds a 5000-op chain
+      specifically to fail a recursive implementation.
+    </p>
+    <p>
+      <code>visited</code> is keyed by <code>id()</code>, so a node with several consumers is emitted
+      exactly once and its <code>_backward()</code> closure runs exactly once. Merging the paths is the
+      job of <code>+=</code> inside <code>accumulate_grad</code>, not of visiting a node repeatedly.
+    </p>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow bwd">Release</p>
+    <h2>The graph has to die</h2>
+    <p>
+      Each <code>_backward</code> closure captures its inputs <em>and</em> its output, so a live graph
+      pins every intermediate activation in memory. After the reverse sweep, <code>_free_graph</code>
+      nulls every visited node's <code>_prev</code> and <code>_backward</code>, turning the whole DAG
+      into garbage the moment the loss goes out of scope. Leaf parameters survive — the model still
+      references them, and they keep their <code>.grad</code> for the optimizer.
+      <code>test_backward_releases_the_graph</code> takes a <code>weakref</code> to an intermediate
+      and asserts it is dead after collection.
+    </p>
+  </section>
+
+  <section class="wide">
+    <p class="eyebrow fwd">Verbatim output</p>
+    <h2>It runs</h2>
+    <div class="code term">
+      <div class="hd"><span>$ .venv/bin/python -m pytest tests/ -q</span><span>python 3.11.15 · numpy 2.4.6 · pytest 9.1.1</span></div>
+<pre>........................................................                 [100%]
+<span class="g">56 passed in 0.15s</span></pre>
+    </div>
+    <div class="code term">
+      <div class="hd"><span>$ .venv/bin/python demo.py</span><span>forward + backward through the engine</span></div>
+<pre><span class="c"># 1. diamond graph: y = x*x + x  ->  dy/dx = 2x+1</span>
+diamond   dy/dx = [-5.  2.  5. 15.]   expected = [-5.  2.  5. 15.]
+
+<span class="c"># 2. broadcasting a bias through a linear layer</span>
+loss      = 12.5
+b.grad    = [2. 1.]    <span class="c">&lt;- summed back down from (2,2) to (2,)</span>
+w.grad    = [[4.0, 3.0], [2.0, 4.0]]</pre>
+    </div>
+    <div style="max-width:72ch">
+    <p style="margin-top:22px">
+      Also verified: <code>grep -rn "import torch" mini_autograd/</code> returns nothing. PyTorch
+      (2.14.0) is installed in the venv and passes its own sanity check, but it is a
+      <em>test-only</em> dependency and Phase 3 is the first phase allowed to import it.
+    </p>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow fwd">Where this is going</p>
+    <h2>Six phases, one gate each</h2>
+    <ol class="phases">
+      <li><span class="t">Core engine<small>Tensor, topological sort, accumulation, unbroadcast, teardown. Ops: add, mul, matmul, sum, relu.</small></span><span class="tag done">56 green</span></li>
+      <li><span class="t">Full op set + numeric checker<small>Remaining 13 ops; central-difference gradient check that never touches PyTorch.</small></span><span class="tag next">next</span></li>
+      <li><span class="t">PyTorch differential test<small>200 random graphs, depth 3–8, agreement to 1e-6 in float64.</small></span><span class="tag todo">queued</span></li>
+      <li><span class="t">Framework layer<small>Module, Linear, Sequential, He/Xavier, MSE, stable cross-entropy, SGD+momentum, Adam.</small></span><span class="tag todo">queued</span></li>
+      <li><span class="t">MNIST + memory<small>&gt;97% test accuracy on CPU; 5000-step leak test asserting flat node count.</small></span><span class="tag todo">queued</span></li>
+      <li><span class="t">README<small>Written last, from what actually happened — real numbers, real bugs, honest limitations.</small></span><span class="tag todo">queued</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <p class="eyebrow bwd">Open for review</p>
+    <h2>Two calls worth arguing about</h2>
+    <dl class="open">
+      <dt>matmul raises on 1-D operands</dt>
+      <dd>
+        NumPy silently prepends or appends a 1 to vector operands, which turns the backward pass into
+        a nest of special cases for a convenience a neural net never needs — <code>x @ W</code> is
+        always at least 2-D. It raises a <code>ValueError</code> that suggests the reshape instead.
+        This is a deviation from the brief and it goes in the limitations section.
+      </dd>
+      <dt>retain_graph exists after all</dt>
+      <dd>
+        The brief asked for teardown and no premature abstraction. One flag went in anyway: without
+        it, a second <code>backward()</code> call fails with a confusing <code>NoneType</code> error
+        rather than an honest one, and the test suite needs a way to inspect a live graph. The default
+        is <code>False</code> — the graph still dies.
+      </dd>
+    </dl>
+  </section>
+
+  <footer>
+    <span>mini-autograd · phase 1 of 6 · gate open</span>
+    <span>numpy only · 386 lines · 56 tests</span>
+  </footer>
+</main>
+
+</body>
+</html>
