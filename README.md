@@ -89,8 +89,9 @@ The report plots the loss, the gradient norm of each parameter, and the function
 the network represents at six checkpoints, so the fit can be watched assembling
 itself out of ReLU kinks. Final training MSE is about 0.003.
 
-Open `site/index.html` for the written walkthrough; it links to both generated
-pages.
+Open `index.html` for the written walkthrough; it links to both generated
+pages. The same three files are published with GitHub Pages from the repository
+root, so `index.html` is the site's landing page.
 
 ## Testing
 
@@ -183,7 +184,8 @@ examples/
   visualize_graph.py   record and draw one backward pass
   train_mlp.py         train a network on the five primitives, and plot it
 tests/                 see the table above
-site/                  the written walkthrough, and the generated pages
+index.html             the written walkthrough (GitHub Pages entry point)
+site/                  the generated pages
 notes/bugs.md          log of defects encountered during development
 ```
 

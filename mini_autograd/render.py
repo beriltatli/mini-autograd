@@ -5,7 +5,7 @@ training report (`training_page`). Both are single files with no external
 JavaScript, so they open from the filesystem and keep working offline; the only
 network request is the webfont link, which degrades to the fallback stack.
 
-The palette matches `site/index.html` on purpose. Throughout the project one
+The palette matches `index.html` on purpose. Throughout the project one
 colour means "forward pass, a value" and another means "backward pass, a
 gradient", and the pages are only readable if that stays consistent.
 """
