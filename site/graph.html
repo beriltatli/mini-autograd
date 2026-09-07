@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One layer, one backward pass</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+:root{
+  --paper:#F1F3F5; --surface:#FFFFFF; --sunk:#E7EBEE;
+  --ink:#12171C; --ink-2:#4C5862; --ink-3:#77848D;
+  --rule:#D3DAE0; --rule-soft:#E3E8EC;
+  --fw:#1F6B8F; --bw:#AE3346; --ok:#2E6B4F;
+  --fw-wash:#E4EEF3; --bw-wash:#F7E7E9;
+  --display:"Bricolage Grotesque","Helvetica Neue",Arial,sans-serif;
+  --body:"Newsreader",Georgia,"Times New Roman",serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#101519; --surface:#171E24; --sunk:#0B1013;
+  --ink:#E8EDF1; --ink-2:#A6B3BC; --ink-3:#77858F;
+  --rule:#2A343C; --rule-soft:#212A31;
+  --fw:#68B4D6; --bw:#E8848F; --ok:#79C4A0;
+  --fw-wash:#16303C; --bw-wash:#392026;
+}}
+:root[data-theme="dark"]{
+  --paper:#101519; --surface:#171E24; --sunk:#0B1013;
+  --ink:#E8EDF1; --ink-2:#A6B3BC; --ink-3:#77858F;
+  --rule:#2A343C; --rule-soft:#212A31;
+  --fw:#68B4D6; --bw:#E8848F; --ok:#79C4A0;
+  --fw-wash:#16303C; --bw-wash:#392026;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font-family:var(--body);font-size:16px;line-height:1.6;
+  -webkit-font-smoothing:antialiased}
+header{padding:38px 26px 20px;max-width:1180px;margin:0 auto}
+h1{font-family:var(--display);font-weight:800;font-size:2rem;margin:0 0 .3em;
+  letter-spacing:-.02em}
+header p{margin:0;color:var(--ink-2);max-width:62ch}
+main{max-width:1180px;margin:0 auto;padding:0 26px 72px}
+.mono{font-family:var(--mono);font-size:.8rem}
+.legend{display:flex;gap:20px;flex-wrap:wrap;align-items:center;
+  margin:18px 0 0;font-family:var(--mono);font-size:.74rem;color:var(--ink-2)}
+.swatch{display:inline-block;width:11px;height:11px;border-radius:2px;
+  margin-right:6px;vertical-align:-1px}
+
+.board{background:var(--surface);border:1px solid var(--rule);border-radius:10px;
+  overflow:auto;position:relative}
+svg{display:block}
+.edge{fill:none;stroke:var(--rule);stroke-width:1.4}
+.edge.fwd{stroke:var(--fw);stroke-width:1.8;opacity:.55}
+.edge.live{stroke:var(--bw);stroke-width:2.6;opacity:1}
+.card{cursor:pointer}
+.card rect.bg{fill:var(--surface);stroke:var(--rule);stroke-width:1.3;rx:7}
+.card.leaf rect.bg{fill:var(--sunk)}
+.card.param rect.bg{stroke:var(--fw);stroke-width:1.8}
+.card.firing rect.bg{stroke:var(--bw);stroke-width:2.6}
+.card.updated rect.bg{fill:var(--bw-wash)}
+.card.selected rect.bg{stroke:var(--ink);stroke-width:2.4}
+.card text{font-family:var(--mono);font-size:11px;fill:var(--ink)}
+.card text.sub{font-size:9.5px;fill:var(--ink-3)}
+.card text.val{font-size:10px;fill:var(--fw)}
+.card text.grad{font-size:10px;fill:var(--bw)}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  margin:20px 0 14px}
+button{font-family:var(--mono);font-size:.76rem;padding:7px 13px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);
+  border-radius:6px;cursor:pointer}
+button:hover{border-color:var(--fw)}
+button[disabled]{opacity:.4;cursor:default}
+input[type=range]{flex:1;min-width:200px;accent-color:var(--bw)}
+.status{font-family:var(--mono);font-size:.78rem;color:var(--ink-2);
+  min-height:1.5em;margin:0 0 8px}
+.status b{color:var(--bw);font-weight:700}
+.panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+  gap:22px;margin-top:26px}
+.panel section{background:var(--surface);border:1px solid var(--rule);
+  border-radius:10px;padding:16px 18px}
+.panel h2{font-family:var(--display);font-size:1rem;margin:0 0 4px}
+.panel .shape{font-family:var(--mono);font-size:.73rem;color:var(--ink-3);
+  margin:0 0 12px}
+table.m{border-collapse:collapse;font-family:var(--mono);font-size:.7rem}
+table.m td{border:1px solid var(--rule-soft);padding:3px 7px;text-align:right;
+  min-width:52px}
+.note{color:var(--ink-3);font-family:var(--mono);font-size:.72rem}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>One layer, one backward pass</h1>
+  <p>Every tensor produced by <code>x @ W + b &rarr; relu &rarr; squared error</code>, and the gradient each step of the reverse sweep writes into it. Click a tensor to read its values.</p>
+  <div class="legend">
+    <span><i class="swatch" style="background:var(--fw)"></i>forward value</span>
+    <span><i class="swatch" style="background:var(--bw)"></i>gradient</span>
+    <span>12 tensors</span>
+    <span>8 backward steps</span>
+    <span>arrow keys to step</span>
+  </div>
+</header>
+<main>
+  <div class="controls">
+    <button id="reset">forward</button>
+    <button id="prev">&larr; back</button>
+    <button id="next">step &rarr;</button>
+    <button id="play">play</button>
+    <input type="range" id="slider" min="-1" max="7" value="-1">
+  </div>
+  <p class="status" id="status"></p>
+  <div class="board" style="max-height:70vh">
+    <svg id="canvas" width="2078" height="474"
+         viewBox="0 0 2078 474"></svg>
+  </div>
+  <div class="panel">
+    <section>
+      <h2 id="sel-name">&nbsp;</h2>
+      <p class="shape" id="sel-shape">&nbsp;</p>
+      <div id="sel-value"></div>
+    </section>
+    <section>
+      <h2>gradient at this step</h2>
+      <p class="shape">dL/d(selected tensor)</p>
+      <div id="sel-grad"></div>
+    </section>
+  </div>
+</main>
+<script>
+const D = {"nodes":[{"idx":0,"label":"scale","op":"","shape":[],"requiresGrad":false,"depth":0,"parents":[],"value":{"min":0.125,"max":0.125,"mean":0.125,"norm":0.125},"valueCells":[[0.125]],"grad":null,"gradCells":null,"x":28.0,"y":28.0},{"idx":1,"label":"neg_y","op":"mul","shape":[4,2],"requiresGrad":false,"depth":0,"parents":[],"value":{"min":-1.0425133694426776,"max":2.3250307746388343,"mean":0.4910519967421939,"norm":3.0322738853467466},"valueCells":[[2.3250307746388343,0.21879166393254573],[1.2459109472530652,0.7322673547034516],[0.5442589828573099,0.31630015636915454],[-0.4116305363741328,-1.0425133694426776]],"grad":null,"gradCells":null,"x":28.0,"y":116.0},{"idx":2,"label":"b","op":"","shape":[2],"requiresGrad":true,"depth":0,"parents":[],"value":{"min":0.0,"max":0.0,"mean":0.0,"norm":0.0},"valueCells":[[0.0,0.0]],"grad":{"min":0.5806118202523607,"max":1.1767148274980166,"mean":0.8786633238751886,"norm":1.3121615262879973},"gradCells":[[1.1767148274980166,0.5806118202523607]],"x":28.0,"y":204.0},{"idx":3,"label":"W","op":"","shape":[3,2],"requiresGrad":true,"depth":0,"parents":[],"value":{"min":-0.5321557387892909,"max":1.0931707764397487,"mean":0.2562302244832988,"norm":1.447731144145392},"valueCells":[[-0.10282773035522741,1.0931707764397487],[-0.5321557387892909,0.2812080560744158],[0.722776145321447,0.07520983820869966]],"grad":{"min":-0.34501904558384117,"max":0.6489369402201395,"mean":0.19963198196270682,"norm":1.1037232950597204},"gradCells":[[0.11083483244260864,0.6489369402201395],[-0.34501904558384117,0.4508027360761567],[0.6174217865719979,-0.28518535795082045]],"x":28.0,"y":292.0},{"idx":4,"label":"x","op":"","shape":[4,3],"requiresGrad":false,"depth":0,"parents":[],"value":{"min":-1.2654214710460525,"max":1.3040000451301372,"mean":0.022070802113584375,"norm":2.4405306374640867},"valueCells":[[0.1257302210933933,-0.1321048632913019,0.6404226504432821],[0.10490011715303971,-0.535669373161111,0.36159505490948474],[1.3040000451301372,0.9470809631292422,-0.7037352358069926],[-1.2654214710460525,-0.6232744625373522,0.0413259793472436]],"grad":null,"gradCells":null,"x":28.0,"y":380.0},{"idx":5,"label":"matmul1","op":"matmul","shape":[4,2],"requiresGrad":true,"depth":1,"parents":[4,3],"value":{"min":-1.555483451817375,"max":1.6388937251722342,"mean":0.07799123282730358,"norm":2.69107677479952},"valueCells":[[0.5202540225142863,0.14846173553550843],[0.5356251700152771,-0.008765295031619614],[-1.1467249757146187,1.6388937251722342],[0.49166893194473604,-1.555483451817375]],"grad":{"min":-0.0,"max":0.7113211992882802,"mean":0.21966583096879713,"norm":0.9757555032078181},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.0],[0.0,0.4887984703853472],[0.020009598892650804,-0.0]],"x":290.0,"y":204.0},{"idx":6,"label":"h","op":"add","shape":[4,2],"requiresGrad":true,"depth":2,"parents":[5,2],"value":{"min":-1.555483451817375,"max":1.6388937251722342,"mean":0.07799123282730358,"norm":2.69107677479952},"valueCells":[[0.5202540225142863,0.14846173553550843],[0.5356251700152771,-0.008765295031619614],[-1.1467249757146187,1.6388937251722342],[0.49166893194473604,-1.555483451817375]],"grad":{"min":-0.0,"max":0.7113211992882802,"mean":0.21966583096879713,"norm":0.9757555032078181},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.0],[0.0,0.4887984703853472],[0.020009598892650804,-0.0]],"x":552.0,"y":204.0},{"idx":7,"label":"pred","op":"relu","shape":[4,2],"requiresGrad":true,"depth":3,"parents":[6],"value":{"min":0.0,"max":1.6388937251722342,"mean":0.41686294814775526,"norm":1.8727814711447262},"valueCells":[[0.5202540225142863,0.14846173553550843],[0.5356251700152771,0.0],[0.0,1.6388937251722342],[0.49166893194473604,0.0]],"grad":{"min":-0.2606283423606694,"max":0.7113211992882802,"mean":0.2269787362224873,"norm":1.035399931104446},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.1830668386758629],[0.13606474571432747,0.4887984703853472],[0.020009598892650804,-0.2606283423606694]],"x":814.0,"y":204.0},{"idx":8,"label":"err","op":"add","shape":[4,2],"requiresGrad":true,"depth":4,"parents":[7,1],"value":{"min":-1.0425133694426776,"max":2.8452847971531208,"mean":0.9079149448899492,"norm":4.141599724417784},"valueCells":[[2.8452847971531208,0.36725339946805413],[1.7815361172683422,0.7322673547034516],[0.5442589828573099,1.9551938815413887],[0.08003839557060322,-1.0425133694426776]],"grad":{"min":-0.2606283423606694,"max":0.7113211992882802,"mean":0.2269787362224873,"norm":1.035399931104446},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.1830668386758629],[0.13606474571432747,0.4887984703853472],[0.020009598892650804,-0.2606283423606694]],"x":1076.0,"y":204.0},{"idx":9,"label":"sq","op":"mul","shape":[4,2],"requiresGrad":true,"depth":5,"parents":[8,8],"value":{"min":0.006406144765516357,"max":8.095645576910675,"mean":2.144106034662183,"norm":9.58130041057404},"valueCells":[[8.095645576910675,0.13487505942084213],[3.1738709371315603,0.5362154787643906],[0.29621784042087357,3.822783114416882],[0.006406144765516357,1.0868341254667249]],"grad":{"min":0.125,"max":0.125,"mean":0.125,"norm":0.3535533905932738},"gradCells":[[0.125,0.125],[0.125,0.125],[0.125,0.125],[0.125,0.125]],"x":1338.0,"y":204.0},{"idx":10,"label":"total","op":"sum","shape":[],"requiresGrad":true,"depth":6,"parents":[9],"value":{"min":17.152848277297466,"max":17.152848277297466,"mean":17.152848277297466,"norm":17.152848277297466},"valueCells":[[17.152848277297466]],"grad":{"min":0.125,"max":0.125,"mean":0.125,"norm":0.125},"gradCells":[[0.125]],"x":1600.0,"y":204.0},{"idx":11,"label":"loss","op":"mul","shape":[],"requiresGrad":true,"depth":7,"parents":[10,0],"value":{"min":2.144106034662183,"max":2.144106034662183,"mean":2.144106034662183,"norm":2.144106034662183},"valueCells":[[2.144106034662183]],"grad":{"min":1.0,"max":1.0,"mean":1.0,"norm":1.0},"gradCells":[[1.0]],"x":1862.0,"y":204.0}],"steps":[{"index":0,"node":11,"kind":"seed","updates":[{"node":11,"delta_norm":1.0,"grad":{"min":1.0,"max":1.0,"mean":1.0,"norm":1.0},"gradCells":[[1.0]]}],"note":"seed dL/dL = 1"},{"index":1,"node":11,"kind":"backward","updates":[{"node":10,"delta_norm":0.125,"grad":{"min":0.125,"max":0.125,"mean":0.125,"norm":0.125},"gradCells":[[0.125]]}],"note":""},{"index":2,"node":10,"kind":"backward","updates":[{"node":9,"delta_norm":0.3535533905932738,"grad":{"min":0.125,"max":0.125,"mean":0.125,"norm":0.3535533905932738},"gradCells":[[0.125,0.125],[0.125,0.125],[0.125,0.125],[0.125,0.125]]}],"note":""},{"index":3,"node":9,"kind":"backward","updates":[{"node":8,"delta_norm":1.035399931104446,"grad":{"min":-0.2606283423606694,"max":0.7113211992882802,"mean":0.2269787362224873,"norm":1.035399931104446},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.1830668386758629],[0.13606474571432747,0.4887984703853472],[0.020009598892650804,-0.2606283423606694]]},{"node":8,"delta_norm":1.035399931104446,"grad":{"min":-0.2606283423606694,"max":0.7113211992882802,"mean":0.2269787362224873,"norm":1.035399931104446},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.1830668386758629],[0.13606474571432747,0.4887984703853472],[0.020009598892650804,-0.2606283423606694]]}],"note":""},{"index":4,"node":8,"kind":"backward","updates":[{"node":7,"delta_norm":1.035399931104446,"grad":{"min":-0.2606283423606694,"max":0.7113211992882802,"mean":0.2269787362224873,"norm":1.035399931104446},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.1830668386758629],[0.13606474571432747,0.4887984703853472],[0.020009598892650804,-0.2606283423606694]]}],"note":""},{"index":5,"node":7,"kind":"backward","updates":[{"node":6,"delta_norm":0.9757555032078181,"grad":{"min":-0.0,"max":0.7113211992882802,"mean":0.21966583096879713,"norm":0.9757555032078181},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.0],[0.0,0.4887984703853472],[0.020009598892650804,-0.0]]}],"note":""},{"index":6,"node":6,"kind":"backward","updates":[{"node":5,"delta_norm":0.9757555032078181,"grad":{"min":-0.0,"max":0.7113211992882802,"mean":0.21966583096879713,"norm":0.9757555032078181},"gradCells":[[0.7113211992882802,0.09181334986701353],[0.44538402931708554,0.0],[0.0,0.4887984703853472],[0.020009598892650804,-0.0]]},{"node":2,"delta_norm":1.3121615262879973,"grad":{"min":0.5806118202523607,"max":1.1767148274980166,"mean":0.8786633238751886,"norm":1.3121615262879973},"gradCells":[[1.1767148274980166,0.5806118202523607]]}],"note":""},{"index":7,"node":5,"kind":"backward","updates":[{"node":3,"delta_norm":1.1037232950597204,"grad":{"min":-0.34501904558384117,"max":0.6489369402201395,"mean":0.19963198196270682,"norm":1.1037232950597204},"gradCells":[[0.11083483244260864,0.6489369402201395],[-0.34501904558384117,0.4508027360761567],[0.6174217865719979,-0.28518535795082045]]}],"note":""}],"root":11};
+const NW = 188.0, NH = 66.0;
+const svg = document.getElementById('canvas');
+const NS = 'http://www.w3.org/2000/svg';
+let step = -1, selected = D.root, timer = null;
+
+function fmt(x){
+  if (x === null || x === undefined) return '-';
+  const a = Math.abs(x);
+  if (a === 0) return '0';
+  if (a < 1e-3 || a >= 1e4) return x.toExponential(1);
+  return x.toFixed(a < 1 ? 3 : 2);
+}
+
+/* Gradient state at a step is a replay: each update carries the parent's full
+   gradient after that push, so the state is the last update at or before k. */
+function gradAt(k){
+  const state = {};
+  for (let i = 0; i <= k; i++)
+    for (const u of D.steps[i].updates) state[u.node] = u;
+  return state;
+}
+
+function el(tag, attrs, parent){
+  const n = document.createElementNS(NS, tag);
+  for (const key in attrs) n.setAttribute(key, attrs[key]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+function draw(){
+  svg.textContent = '';
+  const state = gradAt(step);
+  const fired = step >= 0 ? D.steps[step].node : null;
+  const touched = new Set(step >= 0 ? D.steps[step].updates.map(u => u.node) : []);
+
+  const edges = el('g', {}, svg);
+  for (const n of D.nodes) for (const p of n.parents){
+    const a = D.nodes[p];
+    const x1 = a.x + NW, y1 = a.y + NH/2, x2 = n.x, y2 = n.y + NH/2;
+    const mid = (x1 + x2) / 2;
+    let cls = 'edge';
+    if (step < 0) cls += ' fwd';
+    else if (n.idx === fired && touched.has(p)) cls += ' live';
+    el('path', {class: cls,
+      d: `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`}, edges);
+  }
+
+  for (const n of D.nodes){
+    let cls = 'card';
+    if (!n.op) cls += ' leaf';
+    if (n.requiresGrad && !n.op) cls += ' param';
+    if (n.idx === fired) cls += ' firing';
+    if (touched.has(n.idx)) cls += ' updated';
+    if (n.idx === selected) cls += ' selected';
+    const g = el('g', {class: cls, transform: `translate(${n.x},${n.y})`}, svg);
+    g.addEventListener('click', () => { selected = n.idx; draw(); });
+    el('rect', {class: 'bg', width: NW, height: NH}, g);
+    const t = el('text', {x: 12, y: 21}, g); t.textContent = n.label;
+    const s = el('text', {class: 'sub', x: 12, y: 36}, g);
+    s.textContent = (n.op || 'input') + '  (' + n.shape.join(', ') + ')';
+    const v = el('text', {class: 'val', x: 12, y: 53}, g);
+    v.textContent = '|x| ' + fmt(n.value ? n.value.norm : null);
+    const gr = el('text', {class: 'grad', x: 100, y: 53}, g);
+    const cur = state[n.idx];
+    gr.textContent = cur ? '|g| ' + fmt(cur.grad.norm) : (n.requiresGrad ? '|g| -' : '');
+  }
+
+  document.getElementById('slider').value = step;
+  document.getElementById('prev').disabled = step < 0;
+  document.getElementById('next').disabled = step >= D.steps.length - 1;
+  status(step);
+  detail(state);
+}
+
+function status(k){
+  const box = document.getElementById('status');
+  if (k < 0){
+    box.innerHTML = 'Forward pass complete. ' + D.nodes.length +
+      ' tensors on the tape, no gradients yet. Press <b>step</b> to seed dL/dL.';
+    return;
+  }
+  const s = D.steps[k];
+  const src = D.nodes[s.node];
+  if (s.kind === 'seed'){
+    box.innerHTML = `step ${k}: seed <b>${src.label}</b>.grad = 1`;
+    return;
+  }
+  const parts = s.updates.map(u =>
+    `<b>${D.nodes[u.node].label}</b> (+${fmt(u.delta_norm)})`);
+  box.innerHTML = `step ${k}: <b>${src.label}</b>.${src.op} pushes into ` +
+    parts.join(', ');
+}
+
+function matrix(cells){
+  if (!cells) return '<p class="note">too large to display; see the norm above</p>';
+  let peak = 0;
+  for (const row of cells) for (const v of row) peak = Math.max(peak, Math.abs(v));
+  let html = '<table class="m">';
+  for (const row of cells){
+    html += '<tr>';
+    for (const v of row){
+      const a = peak ? Math.abs(v) / peak * 0.5 : 0;
+      const c = v < 0 ? `rgba(174,51,70,${a})` : `rgba(31,107,143,${a})`;
+      html += `<td style="background:${c}">${fmt(v)}</td>`;
+    }
+    html += '</tr>';
+  }
+  return html + '</table>';
+}
+
+function detail(state){
+  const n = D.nodes[selected];
+  document.getElementById('sel-name').textContent = n.label;
+  document.getElementById('sel-shape').textContent =
+    (n.op || 'input') + '  shape (' + n.shape.join(', ') + ')' +
+    (n.requiresGrad ? '  requires_grad=True' : '  requires_grad=False');
+  document.getElementById('sel-value').innerHTML = matrix(n.valueCells);
+  const cur = state[selected];
+  document.getElementById('sel-grad').innerHTML = cur
+    ? matrix(cur.gradCells)
+    : '<p class="note">no gradient at this step</p>';
+}
+
+function go(k){
+  step = Math.max(-1, Math.min(D.steps.length - 1, k));
+  draw();
+}
+document.getElementById('prev').onclick = () => go(step - 1);
+document.getElementById('next').onclick = () => go(step + 1);
+document.getElementById('reset').onclick = () => { stop(); go(-1); };
+document.getElementById('slider').oninput = e => go(+e.target.value);
+function stop(){
+  clearInterval(timer); timer = null;
+  document.getElementById('play').textContent = 'play';
+}
+document.getElementById('play').onclick = () => {
+  if (timer){ stop(); return; }
+  if (step >= D.steps.length - 1) go(-1);
+  document.getElementById('play').textContent = 'pause';
+  timer = setInterval(() => {
+    if (step >= D.steps.length - 1) stop(); else go(step + 1);
+  }, 750);
+};
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') go(step + 1);
+  if (e.key === 'ArrowLeft') go(step - 1);
+});
+draw();
+</script>
+</body>
+</html>

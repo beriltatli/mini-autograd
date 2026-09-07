@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-autograd"
+version = "0.2.0"
+description = "A reverse-mode automatic differentiation engine in NumPy, with a visualiser for the backward pass."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "torch>=2.0"]
+
+[tool.setuptools]
+packages = ["mini_autograd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# torch's deprecated `reduce_op` alias trips a FutureWarning the moment a test
+# walks the object graph with gc.get_objects(). Not our warning, not our bug.
+filterwarnings = ["ignore:.*reduce_op.*:FutureWarning"]
